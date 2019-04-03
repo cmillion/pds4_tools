@@ -4,10 +4,14 @@ from __future__ import print_function
 from __future__ import unicode_literals
 
 import os
+import io
 import math
+import binascii
 import platform
 import functools
 import traceback
+
+import numpy as np
 
 from . import label_view, table_view, header_view, cache
 from .core import Window, MessageWindow
@@ -16,13 +20,16 @@ from .widgets.tooltip import ToolTip
 from .table_view import array_structure_to_table
 
 from ..reader.core import pds4_read
+from ..reader.data import PDS_array
 from ..reader.read_tables import table_data_size_check
 
+from ..utils.helpers import is_array_like
 from ..utils.logging import logger_init
 
 from ..extern import six
-from ..extern.six.moves.tkinter import (Menu, Canvas, Frame, Scrollbar, Label, Button, BooleanVar)
-from ..extern.six.moves.tkinter_tkfiledialog import askopenfilename
+from ..extern.six.moves.tkinter import (Menu, Canvas, Frame, Scrollbar, Label, Entry, Button, Radiobutton,
+                                        BooleanVar, StringVar)
+from ..extern.six.moves.tkinter_tkfiledialog import askopenfilename, asksaveasfilename
 
 # Initialize the logger
 logger = logger_init()
@@ -45,13 +52,10 @@ class StructureListWindow(Window):
         self._canvas = None
         self._scrolled_frame = None
         self._structure_list = None
-        self._recent_menu = None
         self._label_open = False
 
         # Create menu
-        self._menu = Menu(self._widget)
-        self._widget.config(menu=self._menu)
-        self._add_menu(quiet, lazy_load, show_headers)
+        self._add_menus(quiet, lazy_load, show_headers)
 
         # Add notify event for scroll wheel (used to scroll structure list)
         self._bind_scroll_event(self._mousewheel_scroll)
@@ -180,7 +184,7 @@ class StructureListWindow(Window):
 
         # Add logging messages for data read-in to log
         log = logger.get_handler('log_handler').get_recording()
-        self._structure_list.read_in_log += '\n' + log
+        self._structure_list.read_in_log += log
 
         # Show errors that occurred on loading
         if exception_occurred:
@@ -191,11 +195,11 @@ class StructureListWindow(Window):
     # Draws a summary of the opened label onto the screen
     def _draw_summary(self):
 
-        # Add View menu if it does not already exist
+        # Add View Menu and the Export Menu, if not already done
         if not self._label_open:
 
-            view_menu = Menu(self._menu, tearoff=0)
-            self._menu.add_cascade(label='View', menu=view_menu)
+            # Add a View menu
+            view_menu = self._add_menu('View', in_menu='main')
 
             view_menu.add_command(label='Full Label', command=self._open_label)
 
@@ -207,10 +211,13 @@ class StructureListWindow(Window):
             view_menu.add_checkbutton(label='Show Headers', onvalue=True, offvalue=False,
                                       variable=self._menu_options['show_headers'])
 
+            # Add an Export menu
+            self._add_menu('Export', in_menu='main', postcommand=self._update_export)
+
+        # Draw summary for structures found
         has_structures = len(self._structure_list) > 0
         all_headers = all(structure.is_header() for structure in self._structure_list)
 
-        # Draw summary for structures found
         if has_structures and (not all_headers or self.menu_option('show_headers')):
             self._draw_structure_summary()
 
@@ -535,7 +542,7 @@ class StructureListWindow(Window):
             else:
                 self.open_label(filename)
 
-    def _add_menu(self, quiet, lazy_load, show_headers):
+    def _add_menus(self, quiet, lazy_load, show_headers):
 
         # Initialize menu options
         self._menu_options['quiet'] = BooleanVar()
@@ -547,26 +554,26 @@ class StructureListWindow(Window):
         self._menu_options['show_headers'] = BooleanVar()
         self._add_trace(self._menu_options['show_headers'], 'w', self._update_show_headers, default=show_headers)
 
-        # Create file menu
-        file_menu = Menu(self._widget, tearoff=0)
+        # Add a File menu
+        file_menu = self._add_menu('File', in_menu='main')
         file_menu.add_command(label='Open...', command=lambda: self._open_file_box(False))
+        file_menu.add_command(label='Open from URL...', command=lambda:
+                                self._add_dependent_window(OpenFromURLWindow(self._viewer, self._widget, self)))
         file_menu.add_command(label='Open in New Window...', command=lambda: self._open_file_box(True))
-
         file_menu.add_separator()
-        self._recent_menu = Menu(file_menu, tearoff=0, postcommand=self._update_recently_opened)
-        file_menu.add_cascade(label='Open Recent', menu=self._recent_menu)
+
+        # Add an Open Recent sub-menu to File menu
+        self._add_menu('Open Recent', in_menu='File', postcommand=self._update_recently_opened)
 
         file_menu.add_separator()
         file_menu.add_command(label='Exit', command=self._viewer.quit)
-        self._menu.add_cascade(label='File', menu=file_menu)
 
-        # Create options menu
-        options_menu = Menu(self._widget, tearoff=0)
+        # Add an Options menu
+        options_menu = self._add_menu('Options', in_menu='main')
         options_menu.add_checkbutton(label='Lazy-Load Data', onvalue=True, offvalue=False,
                                      variable=self._menu_options['lazy_load'])
         options_menu.add_checkbutton(label='Hide Warnings', onvalue=True, offvalue=False,
                                      variable=self._menu_options['quiet'])
-        self._menu.add_cascade(label='Options', menu=options_menu)
 
     # Updates the logger state to match current menu options value
     def _update_quiet(self, *args):
@@ -586,28 +593,54 @@ class StructureListWindow(Window):
     # Updates whether Headers structures are shown in the structure summary
     def _update_show_headers(self, *args):
 
-        if self._label_open:
+        if not self._label_open:
+            return
 
-            self._erase_summary()
-            self._draw_summary()
+        self._erase_summary()
+        self._draw_summary()
+
+    # Updates the export menu just prior to showing it
+    def _update_export(self):
+
+        if not self._label_open:
+            return
+
+        # Clear out all existing menu entries
+        export_menu = self._menu('Export')
+        export_menu.delete(0, export_menu.index('last'))
+
+        # Show export buttons for arrays and tables
+        has_export_structures = False
+
+        for structure in self._structure_list:
+            if structure.is_array() or structure.is_table():
+                has_export_structures = True
+                export_menu.add_command(label='{0}...'.format(structure.id[0:29]),
+                    command=lambda structure=structure:
+                    self._add_dependent_window(DataExportWindow(self._viewer, self._widget, structure)))
+
+        # Handle case when are no supported export structures
+        if not has_export_structures:
+            export_menu.add_command(label='None', state='disabled')
 
     # Updates recently opened menu just prior to showing it
     def _update_recently_opened(self):
 
         recent_paths = cache.get_recently_opened()
+        recent_menu = self._menu('Open Recent', in_menu='File')
 
         # Clear out all existing menu entries
-        self._recent_menu.delete(0, self._recent_menu.index('last'))
+        recent_menu.delete(0, recent_menu.index('last'))
 
-        # Show a disabled None option if no existing paths
+        # Handle case when there are no recently opened files
         if len(recent_paths) == 0:
-            self._recent_menu.add_command(label='None', state='disabled')
+            recent_menu.add_command(label='None', state='disabled')
 
         # Show recently opened files
         else:
 
             for path in recent_paths:
-                self._recent_menu.add_command(label=path, command=lambda path=path: self.open_label(path))
+                recent_menu.add_command(label=path, command=lambda path=path: self.open_label(path))
 
     # Called on mouse wheel scroll action, scrolls structure list up or down if scrollbar is shown
     def _mousewheel_scroll(self, event):
@@ -636,7 +669,8 @@ class StructureListWindow(Window):
         if self._label_open:
 
             self._set_title(self._get_title().split('-')[0].strip())
-            self._menu.delete('View')
+            self._remove_menu('View', in_menu='main')
+            self._remove_menu('Export', in_menu='main')
             self._erase_summary()
             self._structure_list = None
             self._label_open = False
@@ -645,6 +679,200 @@ class StructureListWindow(Window):
 
         self._structure_list = None
         super(StructureListWindow, self).close()
+
+
+class OpenFromURLWindow(Window):
+    """ Window for entering a remote URL of a label to open. """
+
+    def __init__(self, viewer, master, summary_window):
+
+        # Set initial necessary variables and do other required initialization procedures
+        super(OpenFromURLWindow, self).__init__(viewer, withdrawn=True)
+
+        # Set the title
+        self._set_title('{0} - Open Label from URL'.format(self._get_title()))
+
+        # Set OpenFromURLWindow to be transient, meaning it does not show up in the task bar and it stays
+        # on top of its master window. This mimics behavior of normal open windows, that ask the path to open,
+        # encouraging user to have at most one of these open.
+        self._widget.transient(master)
+
+        # Initialize open from URL window variables
+        self._summary_window = summary_window
+
+        self._url = StringVar()
+        self._url.set('')
+
+        # Draw the main window content
+        self._show_content()
+
+        # Update window to ensure it has taken its final form, then show it
+        self._widget.update_idletasks()
+        self._show_window()
+
+    # Draws the main content of the window
+    def _show_content(self):
+
+        # Add URL box
+        url_box = Frame(self._widget)
+        url_box.pack(anchor='center', padx=45, pady=(20, 10))
+
+        url_label = Label(url_box, text='Enter Label URL:', font=self.get_font(9))
+        url_label.pack(anchor='nw', pady=(0, 3))
+
+        url = Entry(url_box, bg='white', bd=0, highlightthickness=1, highlightbackground='gray',
+                    width=35, textvariable=self._url)
+        url.pack(pady=(0, 10))
+
+        separator = Frame(url_box, height=2, bd=1, relief='sunken')
+        separator.pack(side='bottom', fill='x', pady=5)
+
+        # Add buttons to Open / Cancel
+        button_box = Frame(self._widget)
+        button_box.pack(side='bottom', anchor='ne', padx=45, pady=(0, 20))
+
+        open_button = Button(button_box, bg=self.get_bg(), width=10, text='Open',
+                             font=self.get_font(weight='bold'), command=self._open_label)
+        open_button.pack(side='left', padx=(0, 5))
+
+        cancel_button = Button(button_box, bg=self.get_bg(), width=10, text='Cancel',
+                               font=self.get_font(weight='bold'), command=self.close)
+        cancel_button.pack(side='left')
+
+        # Place cursor on URL bar to start
+        url.focus()
+
+    # Opens a summary window from a remote URL
+    def _open_label(self):
+
+        url = self._url.get().strip()
+
+        if url != '':
+
+            if '://' not in url:
+                url = 'http://{0}'.format(url)
+
+            self._summary_window.open_label(url)
+            self.close()
+
+    def close(self):
+
+        self._summary_window = None
+        super(OpenFromURLWindow, self).close()
+
+
+class DataExportWindow(Window):
+    """ Window used to show export-to-file options for data """
+
+    def __init__(self, viewer, master, structure):
+
+        # Set initial necessary variables and do other required initialization procedures
+        super(DataExportWindow, self).__init__(viewer, withdrawn=True)
+
+        # Set the title
+        type = 'Array' if structure.is_array() else 'Table'
+        self._set_title("{0} - Export {1} '{2}'".format(self._get_title(), type, structure.id))
+
+        # Set DataExportWindow to be transient, meaning it does not show up in the task bar and it stays
+        # on top of its master window. This mimics behavior of normal save windows, that ask where to save,
+        # encouraging user to have at most one of these open.
+        self._widget.transient(master)
+
+        # Initialize export window variables
+        self._structure = structure
+
+        self._output_format = StringVar()
+
+        self._user_delimiter = StringVar()
+        self._user_delimiter.set('')
+
+        # Draw the main window content
+        self._show_content()
+
+        # Update window to ensure it has taken its final form, then show it
+        self._widget.update_idletasks()
+        self._show_window()
+
+    # Draws the main content of the window
+    def _show_content(self):
+
+        # Add options box, allowing user to select delimiter for output
+        options_box = Frame(self._widget)
+        options_box.pack(anchor='center', padx=45, pady=(20, 15))
+
+        if self._structure.is_array():
+
+            output_type = 'Values'
+            self._output_format.set('space')
+
+            radiobutton = Radiobutton(options_box, text='Space-Separated {0}'.format(output_type),
+                                      variable=self._output_format, value='space')
+            radiobutton.grid(row=0, column=0, sticky='W')
+
+        else:
+
+            output_type = 'Columns'
+            self._output_format.set('fixed')
+
+            radiobutton = Radiobutton(options_box, text='Fixed Width {0}'.format(output_type),
+                                      variable=self._output_format, value='fixed')
+            radiobutton.grid(row=0, column=0, sticky='W')
+
+        radiobutton = Radiobutton(options_box, text='Comma-Separated {0}'.format(output_type),
+                                  variable=self._output_format, value='csv')
+        radiobutton.grid(row=1, column=0, sticky='W')
+
+        radiobutton = Radiobutton(options_box, text='Tab-Separated {0}'.format(output_type),
+                                  variable=self._output_format, value='tab')
+        radiobutton.grid(row=2, column=0, sticky='W')
+
+        radiobutton = Radiobutton(options_box, text='User-Defined Separator: ',
+                                  variable=self._output_format, value='user')
+        radiobutton.grid(row=3, column=0, sticky='W')
+
+        custom_sep = Entry(options_box, bg='white', bd=0, highlightthickness=1, highlightbackground='gray',
+                           width=5, textvariable=self._user_delimiter)
+        custom_sep.grid(row=3, column=1, sticky='W', ipadx=2)
+
+        separator = Frame(options_box, height=2, bd=1, relief='sunken')
+        separator.grid(row=4, column=0, columnspan=5, sticky='WE', pady=(20, 5))
+
+        # Add buttons to Save / Cancel
+        button_box = Frame(self._widget)
+        button_box.pack(side='bottom', anchor='center', pady=(0, 20))
+
+        save_button = Button(button_box, bg=self.get_bg(), width=5, text='Save',
+                             font=self.get_font(weight='bold'), command=self._save_file_box)
+        save_button.pack(side='left', padx=(0, 5))
+
+        cancel_button = Button(button_box, bg=self.get_bg(), width=7, text='Cancel',
+                               font=self.get_font(weight='bold'), command=self.close)
+        cancel_button.pack(side='left')
+
+    # Dialog window to select where the exported data should be saved
+    def _save_file_box(self):
+
+        initial_dir = cache.get_last_open_dir(if_exists=True)
+
+        filename = asksaveasfilename(title='Export Data',
+                                     parent=self._widget,
+                                     initialdir=initial_dir,
+                                     initialfile='Untitled.tab')
+
+        if filename == '' or filename == ():
+            return
+
+        cache.write_last_open_dir(os.path.dirname(filename))
+
+        # Export the data
+        delimiter = {'fixed': None,
+                     'csv': ',',
+                     'tab': '\t',
+                     'user': self._user_delimiter.get(),
+                     }.get(self._output_format.get())
+
+        _export_data(filename, data=self._structure.data, delimiter=delimiter)
+        self.close()
 
 
 def _is_tabular(structure):
@@ -737,6 +965,226 @@ def _is_parsable_header(structure):
     """
 
     return structure.is_header() and hasattr(structure.parser(), 'to_string')
+
+
+def _export_data(filename, data, delimiter=None, fmt=None, newline='\r\n'):
+    """ Exports PDS4 data to a text file.
+
+    Notes
+    -----
+    Supports PDS4 Tables and Arrays.
+
+    This function is not particularly fast, however it is designed to work
+    for all PDS4 data.
+
+    Parameters
+    ----------
+    filename : str or unicode
+        The filename, including path, to write the exported output to.
+    data : PDS_narray or PDS_marray
+        The data to export to file, i.e. the ``structure.data`` attribute.
+    delimiter : str or unicode, optional
+        The delimiter between each value. Defaults to None, which indicates
+        fixed-width output for PDS4 tables, and separated by a single space
+        for PDS4 arrays.
+    fmt : str, unicode or list[str or unicode], optional
+        For PDS4 tables, the format for all, or each, field. For PDS4 arrays,
+        the format for data values. Set 'none' to indicate no formatting
+        of output values. Defaults to None, which uses the PDS4 field_format
+        in the meta data when available.
+    newline : str or unicode, optional
+        The line separator for each record (row) of a PDS4 table. Defaults to CRLF.
+        Has no effect when exporting PDS4 arrays.
+
+    Returns
+    -------
+    None
+    """
+
+    # Formats a single data value according to PDS4 field_format
+    def format_value(datum, format, is_bitstring=False, dtype=None):
+
+        if isinstance(datum, six.binary_type):
+
+            # Handle bitstrings
+            # (Note: we ensure dtype has correct length; otherwise trailing null bytes are skipped by NumPy)
+            if is_bitstring:
+                datum_bytes = np.asarray(datum, dtype=dtype).tobytes()
+                datum = '0x' + binascii.hexlify(datum_bytes).decode('ascii').upper()
+
+            # Handle strings
+            else:
+                datum = datum.decode('utf-8')
+
+        # Format datum
+        try:
+
+            # Convert from NumPy types into Python native types, otherwise the format statement below
+            # can return the format itself, when format is invalid, rather than raising an exception
+            if hasattr(datum, 'item'):
+                datum = datum.item()
+
+            value = format % datum
+        except (ValueError, TypeError):
+            value = datum
+
+        return six.text_type(value)
+
+    # Formats a NumPy ndarray to a string; similar to np.array2string's default functionality
+    # but does not add newlines to deeply nested arrays
+    def format_array(array, format, is_bitstring=False, dtype=None, _top_level=True):
+
+        kwargs = {'format': format,
+                  'is_bitstring': is_bitstring,
+                  'dtype': dtype}
+
+        output = '['
+        for value in array:
+
+            if value.ndim == 0:
+
+                value = format_value(value, **kwargs)
+
+                if np.issubdtype(array.dtype, np.character):
+                    output += "'{0}' ".format(value)
+                else:
+                    output += "{0} ".format(value.strip())
+
+            else:
+                output += format_array(value, _top_level=False, **kwargs)
+
+        output = output[:-1] + '] '
+
+        output = output[:-1] if _top_level else output
+        return output
+
+    # Ensure input data is a PDS array, and unmask any masked arrays
+    data = PDS_array(data, masked=False)
+
+    # Determine if we are dealing with an array or a table
+    is_array = False
+    is_fixed_width = delimiter is None
+
+    if data.dtype.names is not None:
+
+        fields = [data[name] for name in data.dtype.names]
+        bitstring_field_nums = [i for i, field in enumerate(fields)
+                                if field.meta_data.data_type().issubtype('BitString')]
+        num_fields = len(fields)
+        last_field_num = num_fields-1
+
+    else:
+
+        is_array = True
+        data = data.reshape(-1)
+
+    # For arrays
+    if is_array:
+
+        if delimiter is None:
+            delimiter = ' '
+
+        formats = '%s' if (fmt is None or fmt.lower() == 'none') else fmt
+
+    # For tables
+    else:
+
+        # Obtain a list of formats for table fields
+        if fmt is None:
+
+            formats = []
+            for field in fields:
+
+                # Skip formatting scaled/offset values, because the PDS4 Standard is ambiguous on whether
+                # field_format is pre- or post- scaling/offset. This can lead into incorrect formatting.
+                meta_data = field.meta_data
+                is_scaled = meta_data.get('scaling_factor', 1) != 1 or meta_data.get('value_offset', 0) != 0
+
+                format = '%s' if is_scaled else meta_data.get('format', '%s')
+                formats.append(format)
+
+        elif isinstance(fmt, six.string_types) and fmt.lower() == 'none':
+            formats = ['%s'] * fmt
+
+        elif is_array_like(fmt):
+
+            if len(fmt) == num_fields:
+                formats = fmt
+
+            else:
+                raise TypeError("Number of formats ({0}), does not match number of fields ({1}).".
+                                format(len(fmt), num_fields))
+
+        else:
+            formats = [fmt] * num_fields
+
+        # For fixed-width tables, we need to find the proper length of each field (column) such that each
+        # column is separated by a single space (spaces part of string values will add to this)
+        if is_fixed_width:
+
+            fixed_formats = []
+            delimiter = ' '
+
+            for field_num, value in enumerate(fields):
+
+                ndim = value.ndim
+                dtype = value.dtype
+                kwargs = {'format': formats[field_num],
+                          'dtype': dtype,
+                          'is_bitstring': field_num in bitstring_field_nums}
+
+                if ndim > 1:
+                    value = [format_array(element, **kwargs) for element in value]
+                else:
+                    value = [format_value(element, **kwargs) for element in value]
+
+                max_length = len(max(value, key=len))
+                sign = '-' if np.issubdtype(dtype, np.character) or (ndim > 1) else '+'
+
+                fixed_format = '%{0}{1}s'.format(sign, max_length)
+                fixed_formats.append(fixed_format)
+
+    # Write exported output to file for arrays
+    if is_array:
+
+        data.tofile(filename, sep=delimiter, format=formats)
+
+    # Write exported output to file for tables
+    # Note: ideally np.savetxt would be able to achieve the same output, however it cannot. This
+    # steps most critically for it (or more specifically `np.array2string`) adding newlines to highly
+    # nested array outputs, resulting in extraneous newlines. Additionally it does not support a formatter
+    # function, and it is not clear that it deals gracefully with UTF-8 until NumPy 1.14.
+    else:
+
+        with io.open(filename, 'w', newline='', encoding='utf-8') as file_handler:
+
+            # Format and write out data
+            for record in data:
+
+                for field_num, value in enumerate(record):
+
+                    # Format the value (either a scalar, or a group field) according to *fmt*
+                    kwargs = {'format': formats[field_num],
+                              'dtype': fields[field_num].dtype,
+                              'is_bitstring': field_num in bitstring_field_nums}
+
+                    if isinstance(value, np.ndarray):
+                        output_value = format_array(value, **kwargs)
+
+                    else:
+                        output_value = format_value(value, **kwargs)
+
+                    # For fixed-width tables, format the string-value to give the table its fixed width
+                    if is_fixed_width:
+                        output_value = fixed_formats[field_num] % output_value
+
+                    # Add delimiter following the value
+                    if field_num != last_field_num:
+                        output_value += delimiter
+
+                    file_handler.write(output_value)
+
+                file_handler.write(newline)
 
 
 def open_summary(viewer, filename=None, from_existing_structures=None, quiet=False, lazy_load=True):

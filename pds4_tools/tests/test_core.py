@@ -4,25 +4,23 @@ from __future__ import division
 from __future__ import print_function
 from __future__ import unicode_literals
 
-import numpy as np
+import sys
 import pytest
+import numpy as np
 
 from . import PDS4ToolsTestCase
-from .compat import PY26, ET_Element
 
 from ..reader.core import pds4_read
-from ..reader.data import PDS_ndarray, PDS_marray
+from ..reader.data import PDS_ndarray
+from ..reader.data_types import data_type_convert_dates
 from ..reader.array_objects import ArrayStructure
 from ..reader.table_objects import TableStructure, TableManifest
 from ..reader.label_objects import Label
 
-from ..extern import six
+from ..utils import compat
+from ..utils.compat import OrderedDict
 
-# Safe import of OrderedDict
-try:
-    from collections import OrderedDict
-except ImportError:
-    from ..extern.ordered_dict import OrderedDict
+from ..extern import six
 
 
 class TestStructureList(PDS4ToolsTestCase):
@@ -30,7 +28,7 @@ class TestStructureList(PDS4ToolsTestCase):
     def setup(self):
 
         super(TestStructureList, self).setup()
-        self.structures = pds4_read(self.data('af.xml'), lazy_load=True, quiet=True)
+        self.structures = pds4_read(self.data('äf.xml'), lazy_load=True, quiet=True)
 
     def test_get(self):
 
@@ -84,7 +82,7 @@ class TestArrayStructure(PDS4ToolsTestCase):
 
         super(TestArrayStructure, self).setup()
 
-        structures = pds4_read(self.data('af.xml'), lazy_load=True, quiet=True)
+        structures = pds4_read(self.data('äf.xml'), lazy_load=True, quiet=True)
         self.structure = structures[1]
 
     def test_is_array(self):
@@ -127,7 +125,7 @@ class TestTableStructure(PDS4ToolsTestCase):
 
         super(TestTableStructure, self).setup()
 
-        structures = pds4_read(self.data('af.xml'), lazy_load=True, quiet=True)
+        structures = pds4_read(self.data('äf.xml'), lazy_load=True, quiet=True)
         self.structure = structures[11]
 
     def test_is_table(self):
@@ -269,7 +267,7 @@ class TestHeaderStructure(PDS4ToolsTestCase):
 
         super(TestHeaderStructure, self).setup()
 
-        structures = pds4_read(self.data('af.xml'), lazy_load=True, quiet=True)
+        structures = pds4_read(self.data('äf.xml'), lazy_load=True, quiet=True)
         self.structure = structures[0]
 
     def test_is_header(self):
@@ -405,7 +403,7 @@ class TestBinaryTable(PDS4ToolsTestCase):
 
         super(TestBinaryTable, self).setup()
 
-        structures = pds4_read(self.data('af.xml'), lazy_load=True, quiet=True)
+        structures = pds4_read(self.data('äf.xml'), lazy_load=True, quiet=True)
         self.structure = structures[3]
 
     def test_data(self):
@@ -432,7 +430,7 @@ class TestGroupFields(PDS4ToolsTestCase):
     def test_simple_groups(self):
 
         # Test via binary tables
-        structures = pds4_read(self.data('af.xml'),  lazy_load=True, quiet=True)
+        structures = pds4_read(self.data('äf.xml'),  lazy_load=True, quiet=True)
 
         # Test single nested, 1D group fields
         structure = structures[11]
@@ -454,7 +452,7 @@ class TestGroupFields(PDS4ToolsTestCase):
         # Test via fixed width tables
 
         # Test a deeply nested field (nested with-in 3 group fields)
-        structures = pds4_read(self.data('af.xml'), lazy_load=True, quiet=True)
+        structures = pds4_read(self.data('äf.xml'), lazy_load=True, quiet=True)
         structure = structures[9]
         _check_array_equal(structure.field(0)[11, 2, 5, 2:5], [-0.52061242, -0.51312923, -0.50972084], 'float64')
 
@@ -513,7 +511,7 @@ class TestLabel(PDS4ToolsTestCase):
 
         one_liner1 = self.label[0][3]
         assert isinstance(one_liner1, Label)
-        assert isinstance(one_liner1.getroot(), ET_Element)
+        assert isinstance(one_liner1.getroot(), compat.ET_Element)
 
         assert one_liner1.tag == '{http://pds.nasa.gov/pds4/pds/v1}test_getters'
         assert one_liner1.text == '  is_space_significant  '
@@ -533,7 +531,7 @@ class TestLabel(PDS4ToolsTestCase):
 
         one_liner2 = self.label[0][3]
         assert isinstance(one_liner2, Label)
-        assert isinstance(one_liner1.getroot(), ET_Element)
+        assert isinstance(one_liner1.getroot(), compat.ET_Element)
 
         assert one_liner2.tag == 'test_getters'
         assert one_liner2.text == 'is_space_significant'
@@ -628,7 +626,7 @@ class TestLabel(PDS4ToolsTestCase):
         title1 = self.label.find('.//title', return_ET=False)
         title2 = self.label.find('.//title', return_ET=True)
         assert xml_equal(title1, title2)
-        assert isinstance(title2, ET_Element)
+        assert isinstance(title2, compat.ET_Element)
 
     def test_findall(self):
 
@@ -697,7 +695,7 @@ class TestLabel(PDS4ToolsTestCase):
         title2 = self.label.findall('.//title', return_ET=True)
         assert xml_equal(title1[0], title2[0])
         assert isinstance(title2, list)
-        assert isinstance(title2[0], ET_Element)
+        assert isinstance(title2[0], compat.ET_Element)
 
     # def test_findtext(self):
 
@@ -791,6 +789,7 @@ class TestLabel(PDS4ToolsTestCase):
 
         # Make Python 2.6 adjustments, which includes prefix in more local spot than later Python versions
         namespace = ' xmlns:fake_prefix="http://pds.nasa.gov/pds4/fake_prefix/v1"'
+        PY26 = sys.version_info[0:2] == (2, 6)
         py26_namespace = namespace if PY26 else ''
         py27plus_namespace = namespace if (not PY26) else ''
 
@@ -977,6 +976,43 @@ class TestTableDataTypes(PDS4ToolsTestCase):
         utf8_string = [' Tést stríng 1  ', ' Tést  2         ', ' Tést longést 3 ']
         _check_array_equal(table['UTF8_String'], utf8_string, 'U18')
 
+    @pytest.mark.xfail(tuple(map(int, np.__version__.split('.')[:2])) < (1, 11),
+                       reason="NumPy datetime64 API changes.")
+    def test_dates(self):
+
+        table = self.table
+
+        # Test ASCII_Date_Time_YMD_UTC
+        date_string_ymd = table['Dates_YMD_UTC']
+        date_ymd = [np.datetime64('2018-10-10T05:05'), np.datetime64('2018-01-10T05:05:05.123'),
+                    np.datetime64('2014')]
+
+        _check_array_equal(data_type_convert_dates(date_string_ymd), date_ymd, 'datetime64[us]')
+
+        # Test ASCII_Date_DOY
+        date_string_doy = table['Dates_DOY_Local']
+        date_doy = [np.datetime64('2018-07-19'), np.datetime64('2018-07-20'), np.datetime64('2018-07-21')]
+
+        _check_array_equal(data_type_convert_dates(date_string_doy), date_doy, 'datetime64[D]')
+
+    def test_bitstrings(self):
+
+        # Test bit strings with decode_strings on
+        structures1 = pds4_read(self.data('test_table_data_types.xml'),
+                                decode_strings=True, lazy_load=True, quiet=True)
+
+        # Test via UnsignedBitString
+        unsigned_bitstring = [b'\x1cZ\xd8', b'\xfb\xfb\x18', b'ZY\xe8']
+        _check_array_equal(structures1[0]['UnsignedBitString'], unsigned_bitstring, 'S3')
+
+        # Test bit strings with decode_strings off
+        structures2 = pds4_read(self.data('test_table_data_types.xml'),
+                                decode_strings=True, lazy_load=True, quiet=True)
+
+        # Test via SignedBitString
+        signed_bitstring = [b'\x013', b'\xfe\x82', b'!\xfc']
+        _check_array_equal(structures2[0]['SignedBitString'], signed_bitstring, 'S2')
+
     def test_overflow(self):
 
         table = self.table
@@ -1136,6 +1172,7 @@ class TestMaskedData(PDS4ToolsTestCase):
                                         mask=[False, False, True, True])
 
         _check_array_equal(table['SignedMSB4'], signed_msb4, 'int32')
+        _check_array_equal(table['SignedMSB4'].filled(), np.asarray(signed_msb4), 'int32')
         assert np.array_equal(table['SignedMSB4'].mask, signed_msb4.mask)
 
         # Test as_masked in binary fields (IEEE754MSBDouble)
@@ -1143,6 +1180,7 @@ class TestMaskedData(PDS4ToolsTestCase):
                                    mask=[False, True, True, False])
 
         _check_array_equal(table['IEEE754MSBDouble'], double, 'float64')
+        _check_array_equal(table['IEEE754MSBDouble'].filled(), np.asarray(double), 'float64')
         assert np.array_equal(table['IEEE754MSBDouble'].mask, double.mask)
 
         # Test as_masked in character fields (ASCII_Real)
@@ -1150,6 +1188,7 @@ class TestMaskedData(PDS4ToolsTestCase):
                                        mask=[False, True, False, True])
 
         _check_array_equal(table['ASCII_Real'], ascii_real, 'float64')
+        _check_array_equal(table['ASCII_Real'].filled(), np.asarray(ascii_real), 'float64')
         assert np.array_equal(table['ASCII_Real'].mask, ascii_real.mask)
 
         # Test as_masked in character fields (ASCII_Integer)
@@ -1157,6 +1196,7 @@ class TestMaskedData(PDS4ToolsTestCase):
                                           mask=[False, True, False, False])
 
         _check_array_equal(table['ASCII_Integer'], ascii_integer, 'int64')
+        _check_array_equal(table['ASCII_Integer'].filled(), np.asarray(ascii_integer), 'int64')
         assert np.array_equal(table['ASCII_Integer'].mask, ascii_integer.mask)
 
         # Test as_masked in character fields (ASCII_Numeric_Base16 that does not fit into int64)
@@ -1164,6 +1204,7 @@ class TestMaskedData(PDS4ToolsTestCase):
                                           mask=[True, False, False, True])
 
         _check_array_equal(table['ASCII_Numeric_Base16'], ascii_integer, 'object')
+        _check_array_equal(table['ASCII_Numeric_Base16'].filled(), np.asarray(ascii_integer), 'object')
         assert np.array_equal(table['ASCII_Numeric_Base16'].mask, ascii_integer.mask)
 
         # Test as_masked, with Special_Constants together with scaling/offset
@@ -1171,7 +1212,12 @@ class TestMaskedData(PDS4ToolsTestCase):
                                         mask=[False, False, True, True])
 
         _check_array_equal(table['SignedMSB4 with Scaling/Offset'], signed_msb4, 'float64')
+        _check_array_equal(table['SignedMSB4 with Scaling/Offset'].filled(), np.asarray(signed_msb4), 'float64')
         assert np.array_equal(table['SignedMSB4 with Scaling/Offset'].mask, signed_msb4.mask)
+
+        # Test retrieval of individual elements from records in as_masked() data
+        assert np.equal(table[0][0], 2147480000)
+        assert np.equal(table.data.filled()[3][-2], -99999.0)
 
     def test_table_scaling_with_special_constants(self):
 
@@ -1207,8 +1253,8 @@ class TestMaskedData(PDS4ToolsTestCase):
         array_lsb_double = self.structures[4].as_masked()
         lsb_double = np.ma.MaskedArray([1.79e+200, -5.730300000000001e+102, -10133.231, 1.79e+200],
                                        mask=[True, False, False, True])
-        assert np.array_equal(array_lsb_double.data.mask, lsb_double.mask)
 
+        assert np.array_equal(array_lsb_double.data.mask, lsb_double.mask)
         _check_array_equal(array_lsb_double.data, lsb_double, 'float64')
 
     def test_array_scaling_with_special_constants(self):
@@ -1256,13 +1302,41 @@ class TestMaskedData(PDS4ToolsTestCase):
         assert np.isclose(array.data.fill_value, 3994967214)
 
 
+class TestDownloadFile(PDS4ToolsTestCase):
+
+    def test_download_file(self):
+
+        # Test downloads with ASCII URL
+        structures_web = pds4_read(self.data('colors.xml', from_web=True), lazy_load=True)  # afö.xml
+        structures_local = pds4_read(self.data('colors.xml'))
+
+        # Test that lazy-load works with URLs
+        assert(structures_web[0].data_loaded is False)
+
+        # Test that data is equal whether downloaded or accessed locally
+        assert(np.array_equal(structures_web[0].data, structures_local[0].data))
+
+        # Test downloads with both encoded and decoded UTF-8 in URL
+        structures_web1 = pds4_read(self.data('äf.xml', from_web=True), lazy_load=True)
+        structures_web2 = pds4_read(self.data('%C3%A4f.xml', from_web=True), lazy_load=True)
+        structures_local = pds4_read(self.data('äf.xml'))
+
+        assert xml_equal(structures_web1.label, structures_local.label)
+        assert xml_equal(structures_web2.label, structures_local.label)
+
+
 def _check_array_equal(unknown_array, known_array, known_typecode):
 
-    is_float_array = np.issubdtype(np.asarray(unknown_array).dtype, 'float')
-    is_complex_array = np.issubdtype(np.asarray(unknown_array).dtype, 'complex')
+    is_int_array = np.issubdtype(np.asarray(unknown_array).dtype, np.integer)
+    is_float_array = np.issubdtype(np.asarray(unknown_array).dtype, np.floating)
+    is_complex_array = np.issubdtype(np.asarray(unknown_array).dtype, np.complexfloating)
+
+    # Check that int values are equal
+    if is_int_array:
+        assert np.array_equal(unknown_array, np.asanyarray(known_array, dtype='object'))
 
     # Check that float values are equal
-    if is_float_array:
+    elif is_float_array:
 
         # Tolerances for floating point comparison
         # (set such that differences large enough to raise eyebrows and thus should be investigated will fail)
@@ -1287,9 +1361,9 @@ def _check_array_equal(unknown_array, known_array, known_typecode):
 
         _check_array_equal(unknown_imag_array, known_imag_array, 'float64')
 
-    # Check that all other (non-float and non-complex) values are equal
+    # Check that all other (non-int, non-float and non-complex) values are equal
     else:
-        assert np.array_equal(unknown_array, np.asanyarray(known_array, dtype='object'))
+        assert np.array_equal(unknown_array, known_array)
 
     # Check that typecode is correct
     assert (unknown_array.dtype == known_typecode) or (unknown_array.dtype.name == known_typecode)

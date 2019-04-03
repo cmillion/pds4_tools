@@ -25,7 +25,8 @@ def init_cache():
     These should be initialized as early as possible into the Viewer startup sequence.
 
     Currently the cache is used to persist the most recently opened files, the MPL cache and the last
-    version of the viewer used.
+    version of the viewer used. Additionally, when files are opened from a URL, they are temporary
+    downloaded into the cache as well.
 
     Returns
     -------
@@ -42,6 +43,9 @@ def init_cache():
             logger.warning('Unable to create cache directory. Cache will not work. '
                            'Received: {0}'.format(str(e)))
             return
+
+    # Set the download cache location to match the Viewer cache location
+    os.environ['PDS4TOOLSCACHEDIR'] = cache_dir
 
     # Set MPL cache
     _set_mpl_cache()
@@ -91,7 +95,7 @@ def write_recently_opened(file_paths, append=True, update_last_open_dir=True):
         True if successfully written to file, False if an exception occurred.
     """
 
-    max_files = 6
+    max_files = 10
 
     # Allow a single file path as a string-like
     if isinstance(file_paths, (six.binary_type, six.text_type)):
@@ -335,18 +339,31 @@ def _set_mpl_cache():
     # Obtain the cache directory for MPL (inside the Viewer's cache directory)
     mpl_cache_dir = os.path.join(app_cache_dir, 'mpl-data')
 
-    # Obtain the frozen location of 'mpl-data'
-    mpl_frozen_dir = os.path.join(sys._MEIPASS, 'mpl-data')
+    # Obtain resource directory location for PyInstaller and Py2App respectively
+    if hasattr(sys, '_MEIPASS'):
+        resource_dir = sys._MEIPASS
+    elif 'RESOURCEPATH' in os.environ:
+        resource_dir = os.environ['RESOURCEPATH']
+    else:
+        resource_dir = None
 
     # Copy mpl-data to cache if necessary and possible. See notes docstring above for why this is necessary.
     # To save time, we copy only if Viewer version has changed since last time mpl-data was copied
     error_occurred = False
+
     if _get_cache_version() != _get_current_version():
 
         logger.warning('Copying mpl-data to enable permanent MPL cache. This should only run once, '
                        'on the initial run of each new version of PDS4 Viewer.')
 
+        # Attempt to copy 'mpl-data' to cache
         try:
+
+            if resource_dir is None:
+                raise IOError('Unable to determine resource path for Pyinstaller or Py2App.')
+
+            # Frozen location of 'mpl-data'
+            mpl_frozen_dir = os.path.join(resource_dir, 'mpl-data')
 
             if os.path.exists(mpl_cache_dir):
                 shutil.rmtree(mpl_cache_dir, ignore_errors=True)
@@ -356,7 +373,7 @@ def _set_mpl_cache():
         except (OSError, IOError, shutil.Error) as e:
             error_occurred = True
             logger.warning('Unable to set MPL datapath. MPL cache may not work. '
-                           'Received: {0}'.format(str(e)))
+                           'Received: {0}'.format(e))
 
     if not error_occurred:
 
